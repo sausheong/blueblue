@@ -1,0 +1,48 @@
+<!doctype html><meta charset=utf-8>
+<html>
+    <head>
+        <style>
+            body {
+                font-family:'Franklin Gothic Medium', Arial, sans-serif;
+                margin-left: 40px;
+            }
+            h2 {
+                color: darkslateblue;                              
+            } 
+            </style>
+    </head>
+    <body>
+        <h2>BlueBlue BLE beacon scanner (for Radioland beacons).</h2>
+        <h3>Start scanning</h3>
+        <p>
+            To start scanning call this URL (replace 0.0.0.0 with your server IP):
+        </p>
+        <p>
+            <code>
+                <a href="/start">http://0.0.0.0:{{ . }}/start</a>
+            </code>
+        </p>
+        <h3>Stop scanning</h3>
+        <p>
+            To stop scanning call this URL:
+        </p>
+        <p>
+            <code>
+                <a href="/stop">http://0.0.0.0:{{ . }}/stop</a>
+            </code>
+        </p>
+        <p>Note: you need to stop scanning before you can stop the server.</p>
+        <h3>Get JSON of all beacons found</h3>
+        <p>
+            To get a JSON of all beacons detected past 90 seconds call this URL:
+        </p>
+        <p>
+            <code>
+                <a href="/beacons?last=90">http://0.0.0.0:{{ . }}/beacons?last=90</a>
+            </code>
+
+            Default is 60 seconds.
+        </p>
+
+    </body>
+</html>
