@@ -29,7 +29,7 @@ var stop bool = true
 
 // Device represents a BLE device
 type Device struct {
-	MAC           string    `json:"mac"`
+	Address       string    `json:"address"`
 	Detected      time.Time `json:"detected"`
 	Since         string    `json:"since"`
 	Name          string    `json:"name"`
@@ -52,7 +52,6 @@ func init() {
 	dur = flag.Duration("d", 5*time.Second, "Scan duration")
 	port = flag.Int("p", 23232, "the port where the server starts")
 	flag.Parse()
-
 }
 
 func main() {
@@ -76,7 +75,7 @@ func main() {
 func adScanHandler(a ble.Advertisement) {
 	mutex.Lock()
 	device := Device{
-		MAC:           a.Addr().String(),
+		Address:       a.Addr().String(),
 		Detected:      time.Now(),
 		Name:          clean(a.LocalName()),
 		RSSI:          a.RSSI(),
