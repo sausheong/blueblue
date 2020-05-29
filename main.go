@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"html/template"
@@ -11,12 +10,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
+	"unicode"
 
-	"github.com/go-ble/ble"
-	"github.com/go-ble/ble/linux"
-	"github.com/pkg/errors"
+	"github.com/sausheong/ble"
+	"github.com/sausheong/ble/linux"
 )
 
 var dur *time.Duration
@@ -25,26 +27,23 @@ var port *int
 var logger *log.Logger
 var stop bool = true
 
-// Beacon represents a BLE beacon
-type Beacon struct {
-	MAC              string    `json:"mac"`
-	Detected         time.Time `json:"detected"`
-	Name             string    `json:"name"`
-	UUID             string    `json:"uuid"`
-	Major            string    `json:"major"`
-	Minor            string    `json:"minor"`
-	RSSI             int       `json:"rssi"`
-	ManufacturerData string    `json:"manufacturer_data"`
-	ServiceUUID      string    `json:"service_uuid"`
-	ServiceData      string    `json:"service_data"`
-	Battery          string    `json:"battery"`
-	Temperature      string    `json:"temperature"`
-	BaseStation      string    `json:"base_station"`
+// Device represents a BLE device
+type Device struct {
+	MAC           string    `json:"mac"`
+	Detected      time.Time `json:"detected"`
+	Since         string    `json:"since"`
+	Name          string    `json:"name"`
+	RSSI          int       `json:"rssi"`
+	Advertisement string    `json:"advertisement"`
+	ScanResponse  string    `json:"scanresponse"`
 }
 
-var beacons []Beacon
+var mutex sync.RWMutex
+var devices map[string]Device
 
 func init() {
+	devices = make(map[string]Device)
+	mutex = sync.RWMutex{}
 	d, err := filepath.Abs(filepath.Dir(os.Args[0]))
 	if err != nil {
 		log.Fatal("Can't get running directory:", err)
@@ -53,6 +52,7 @@ func init() {
 	dur = flag.Duration("d", 5*time.Second, "Scan duration")
 	port = flag.Int("p", 23232, "the port where the server starts")
 	flag.Parse()
+
 }
 
 func main() {
@@ -72,58 +72,19 @@ func main() {
 	serve()
 }
 
-// handle the advertisement
-func advHandler(a ble.Advertisement) {
-	if len(a.ServiceData()) > 0 {
-		svcdata := a.ServiceData()
-		for _, s := range svcdata {
-			// Radioland beacon service UUID
-			if s.UUID[0] == 0x03 && s.UUID[1] == 0x18 {
-				now := time.Now()
-				beacon := Beacon{
-					MAC:              a.Addr().String(),
-					Detected:         now,
-					Name:             a.LocalName(),
-					UUID:             getUUID(a.ManufacturerData()),
-					Major:            getMajor(a.ManufacturerData()),
-					Minor:            getMinor(a.ManufacturerData()),
-					RSSI:             a.RSSI(),
-					ManufacturerData: hex.EncodeToString(a.ManufacturerData()),
-					ServiceUUID:      hex.EncodeToString(s.UUID),
-					ServiceData:      hex.EncodeToString(s.Data),
-					Battery:          getBatteryLevel(a.ManufacturerData()),
-					Temperature:      "0",
-					BaseStation:      "Pi4",
-				}
-				beacons = append(beacons, beacon)
-			}
-		}
+// Handle the advertisement scan
+func adScanHandler(a ble.Advertisement) {
+	mutex.Lock()
+	device := Device{
+		MAC:           a.Addr().String(),
+		Detected:      time.Now(),
+		Name:          clean(a.LocalName()),
+		RSSI:          a.RSSI(),
+		Advertisement: formatHex(hex.EncodeToString(a.LEAdvertisingReportRaw())),
+		ScanResponse:  formatHex(hex.EncodeToString(a.ScanResponseRaw())),
 	}
-}
-
-// get UUID
-func getUUID(md []byte) (uuid string) {
-	// byte 4 - 20 (16 bytes)
-	uuid = hex.EncodeToString(md[4:20])
-	return
-}
-
-func getMajor(md []byte) (major string) {
-	// byte 21 - 23 (2 bytes)
-	major = hex.EncodeToString(md[21:23])
-	return
-}
-
-func getMinor(md []byte) (minor string) {
-	// byte 24 - 26 (2 bytes)
-	minor = hex.EncodeToString(md[24:26])
-	return
-}
-
-func getBatteryLevel(md []byte) (batt string) {
-	// last byte
-	batt = fmt.Sprintf("%x", md[len(md)-1])
-	return
+	devices[a.Addr().String()] = device
+	mutex.Unlock()
 }
 
 // start the web server
@@ -133,7 +94,7 @@ func serve() {
 	mux.HandleFunc("/", index)
 	mux.HandleFunc("/stop", stopScan)
 	mux.HandleFunc("/start", startScan)
-	mux.HandleFunc("/beacons", beaconsJSON)
+	mux.HandleFunc("/devices", showDevices)
 	server := &http.Server{
 		Addr:    "0.0.0.0:" + strconv.Itoa(*port),
 		Handler: mux,
@@ -142,51 +103,39 @@ func serve() {
 	server.ListenAndServe()
 }
 
-func filterByDate(beacons []Beacon, sec int) (results []Beacon) {
-	for _, beacon := range beacons {
-		t := time.Now().Add(-1 * time.Duration(sec) * time.Second)
-		if t.Before(beacon.Detected) {
-			results = append(results, beacon)
-		}
-	}
-	return
-}
-
 // index for web server
 func index(w http.ResponseWriter, r *http.Request) {
 	t, _ := template.ParseFiles(*dir + "/public/index.html")
-	t.Execute(w, strconv.Itoa(*port))
+	t.Execute(w, stop)
 }
 
-// show a JSON of beacons
-func beaconsJSON(w http.ResponseWriter, r *http.Request) {
-	lastParam := r.URL.Query().Get("last")
-	if lastParam == "" {
-		lastParam = "60"
+// handler to show list of devices
+func showDevices(w http.ResponseWriter, r *http.Request) {
+	t, _ := template.ParseFiles(*dir + "/public/devices.html")
+
+	// convert map to array, added detect since duration and
+	// remove anything that's more than 60 seconds
+	data := []Device{}
+	for _, device := range devices {
+		device.Since = strconv.Itoa(int(time.Since(device.Detected).Seconds()))
+		tn := time.Now().Add(-1 * time.Duration(60) * time.Second)
+		if tn.Before(device.Detected) {
+			data = append(data, device)
+		}
 	}
-	last, err := strconv.Atoi(lastParam)
-	if err != nil {
-		t, _ := template.ParseFiles(*dir + "/public/error.html")
-		t.Execute(w, err)
-	}
-	filtered := filterByDate(beacons, last)
-	str, err := json.MarshalIndent(filtered, "", "  ")
-	if err != nil {
-		t, _ := template.ParseFiles(*dir + "/public/error.html")
-		t.Execute(w, err)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(str))
+	// sort by RSSI
+	sort.SliceStable(data, func(i, j int) bool {
+		return data[i].RSSI > data[j].RSSI
+	})
+	t.Execute(w, data)
 }
 
 // handler to start scanning
 func startScan(w http.ResponseWriter, r *http.Request) {
 	if !stop {
 		w.WriteHeader(409)
-		w.Write([]byte("Already scanning."))
 	} else {
 		go scan()
-		w.Write([]byte("Request to start scanning accepted."))
 	}
 }
 
@@ -194,10 +143,8 @@ func startScan(w http.ResponseWriter, r *http.Request) {
 func stopScan(w http.ResponseWriter, r *http.Request) {
 	if stop {
 		w.WriteHeader(409)
-		w.Write([]byte("Already stopped."))
 	} else {
 		stop = true
-		w.Write([]byte("Request to stop scanning accepted."))
 	}
 }
 
@@ -207,21 +154,26 @@ func scan() {
 	logger.Println("Started scanning every", *dur)
 	for !stop {
 		ctx := ble.WithSigHandler(context.WithTimeout(context.Background(), *dur))
-		check(ble.Scan(ctx, true, advHandler, nil))
+		ble.Scan(ctx, false, adScanHandler, nil)
 	}
 	logger.Println("Stopped scanning.")
 	stop = true
 }
 
-// check the BLE scan for errors
-func check(err error) {
-	switch errors.Cause(err) {
-	case nil:
-	case context.DeadlineExceeded:
-		logger.Println("Scan complete.")
-	case context.Canceled:
-		logger.Println("Scan canceled.")
-	default:
-		logger.Fatal(err.Error())
+// reformat string for proper display of hex
+func formatHex(instr string) (outstr string) {
+	outstr = ""
+	for i := range instr {
+		if i%2 == 0 {
+			outstr += instr[i:i+2] + " "
+		}
 	}
+	return
+}
+
+// clean up the non-ASCII characters
+func clean(input string) string {
+	return strings.TrimFunc(input, func(r rune) bool {
+		return !unicode.IsGraphic(r)
+	})
 }
